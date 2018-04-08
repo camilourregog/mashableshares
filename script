@@ -1,0 +1,384 @@
+##Importacion de datos de entrenamiento y prediccion Kaggle
+datos<- read.csv("trainreg.csv")
+testdata<-read.csv("testreg.csv")
+
+##Exploracion distribucion de variables de entrenamiento
+pacman::p_load(Hmisc,e1071)
+
+datos<-datos[,-c(1,2)]
+testdata<-testdata[,-c(1,2)]
+
+par(mfrow=c(3,4))
+for(i in 1:length(datos)){hist(datos[,i], xlab=names(datos)[i])}
+
+describe(datos)
+par(mfrow=c(1,1))
+hist(datos$n_tokens_content,breaks=100)
+skewness(datos$n_non_stop_words)
+
+
+hist(datos$n_unique_tokens,breaks=100)
+summary(datos$n_unique_tokens)
+table(datos$n_non_stop_words)
+
+plot(datos$n_unique_tokens)
+datos[which.max(datos$n_unique_tokens),"n_unique_tokens"]
+hist(datos$n_unique_tokens,breaks=100)
+hist(log(datos$n_unique_tokens[-which.max(datos$n_unique_tokens)]),breaks=100)
+
+plot(datos$n_non_stop_words)
+datos[which.max(datos$n_non_stop_words),"n_non_stop_words"]
+hist(datos$n_non_stop_words[-which.max(datos$n_non_stop_words)],breaks=100)
+hist(log(datos$n_non_stop_words[-which.max(datos$n_non_stop_words)]),breaks=100)
+describe(datos$n_non_stop_words)
+summary(datos$n_non_stop_words)
+table(datos$n_non_stop_words)
+
+plot(datos$n_non_stop_unique_tokens)
+which.max(datos$n_non_stop_unique_tokens)
+datos[20633,"n_non_stop_unique_tokens"]
+hist(datos$n_non_stop_unique_tokens,breaks=100)
+hist(log(datos$n_non_stop_unique_tokens[-20633]),breaks=100)
+
+
+pacman::p_load(caret)
+#analisis componentes principales
+pcaObject <- prcomp(datos,center = TRUE, scale. = TRUE)
+percentVariance <- pcaObject$sd^2/sum(pcaObject$sd^2)*100
+sum(percentVariance[1:25])#Los primeros 25 componentes suman el 83% de la variacion
+pcaObject$rotation[,1:2] #Los pesos relativos de cada variable en un componente dado
+
+###Correlacion de variables (filtering)
+nearZeroVar(datos)
+correlations <- cor(datos)
+dim(correlations)
+correlations[1:4, 1:4]
+pacman::p_load(corrplot)
+corrplot(correlations, order = "hclust",tl.cex = 0.55) #Grafico de correlaciones ordenado por clustering jerarquico
+highCorr <- findCorrelation(correlations, cutoff = .85)#Filtro para remover variables con correlaciones desde 0.85
+length(highCorr)#numero de variables que se remueven
+highCorr 
+names(datos)[highCorr]
+
+filtered <- datos[, -highCorr]
+datos<-filtered 
+testdata<-testdata[,-highCorr]
+
+###Dependencias lineales
+comboInfo <- findLinearCombos(datos)
+comboInfo
+names(datos)[comboInfo$remove]
+datos<-datos[,-comboInfo$remove] #remover dependencias lineales restantes
+testdata<-testdata[,-comboInfo$remove] 
+
+###Transformaciones para reducir sesgo
+
+##BoxCox sobre variables con sesgo > 3... esta es opcional, 
+##no se aplica porque hay muchas variables con valores negativos
+##en su lugar se aplica abajo transformacion YeoJohnson
+#SkewVal<-apply(datos,2,skewness)
+#clskew<- which(abs(SkewVal)>3,arr.ind = T)
+#clskew<-clskew[-length(clskew)]
+#length(clskew)
+
+#for(i in c(clskew)){
+  #transf<-BoxCoxTrans((datos)[,i])
+  #predtrans<-predict(transf,(datos)[,i])
+  #datos[,i]<-predtrans
+#}
+
+#for(i in c(clskew)){
+#  transf1<-BoxCoxTrans((testdata)[,i])
+#  predtrans<-predict(transf1,(testdata)[,i])
+#  testdata[,i]<-predtrans
+#}
+
+####Transformation YeoJohnson, se elgio esta
+datos1<-datos[,-54]
+trans <- preProcess(datos1,method = c("YeoJohnson"))
+trans
+transformed <- predict(trans, datos1)
+SkewVal<-apply(datos,2,skewness)
+SkewVal2<-apply(transformed,2,skewness)
+sum(abs(SkewVal))#suma del sesgo del dataset sin transformacion de variables
+sum(abs(SkewVal2))#suma del sesgo del dataset transformado
+
+par(mfrow=c(3,4))
+for(i in 1:length(transformed)){hist(transformed[,i], xlab=names(transformed)[i])}
+
+
+shares<-datos$shares
+datos<-cbind(transformed,shares)
+testdata <- predict(trans, testdata)
+
+
+
+
+#17,53,602910, 5936490
+#Muestra de entrenamiento y de validacion
+s=round(runif(1,1,12345678),0)
+set.seed(5936490)
+n1=sample(seq(1:dim(datos)[1]),dim(datos)[1]-5277)
+train=datos[n1,]
+test=datos[-n1,]
+
+
+#######################################################
+######################################################
+
+#5. Ahora con penalizacion en norma 1 (LASSO)
+
+pacman::p_load(glmnet)
+
+par(mfrow=c(1,1))
+Xtestdata<-as.matrix(testdata)
+X=model.matrix(shares~.,train)[,-1]
+Xtest=model.matrix(shares~.,test)[,-1]
+
+y=train$shares
+ytest=test$shares
+
+mod1=glmnet(X,y,alpha=1)
+plot(mod1)
+
+
+cvmod1=cv.glmnet(X,y,alpha=1)
+cvmod1$lambda.min
+plot(cvmod1)
+
+mod_pen1=glmnet(X,y,alpha=1,lambda=cvmod1$lambda.min)
+coef(mod_pen1)
+
+predp1=predict(mod_pen1,Xtest)
+rmsep1=sqrt(mean((ytest-predp1)^2))
+rmsep1
+
+predlasso=predict(mod_pen1,Xtestdata)
+
+
+#random forest
+
+pacman::p_load(randomForest)
+
+rf.mash=randomForest(shares~.-shares,train,mtry=4)
+
+imp_rf=importance(rf.mash)
+imp_rf
+varImpPlot(rf.mash)
+
+pred_rf=predict(rf.mash,test)
+
+rmserf=sqrt(mean((pred_rf-test$shares)^2))
+rmserf
+
+predrf<-predict(rf.mash,testdata)
+
+
+
+
+
+#############################################################################
+#BOOSTING
+#############################################################################
+pacman::p_load(gbm)
+
+pacman::p_load(mboost)
+
+#mboost
+
+m1 <- glmboost(shares ~ . , data = train)
+predict_boost=predict(m1,test)
+plot(m1)
+
+rmse_boost=sqrt(mean((predict_boost-test$shares)^2))
+rmse_boost
+
+predglmboost<-predict(m1,testdata)
+#gbm
+
+ntrees<-seq(1,300,50)
+shrin<-seq(0.1,1.5,0.15)
+cvmseboo<-matrix(0,length(ntrees),length(shrin))
+for (i in 1:length(ntrees)){
+  
+  for(j in 1:length(shrin)){
+    m2=gbm(shares~.,data=train,n.trees=ntrees[i],shrinkage=shrin[j],distribution="gaussian")
+    
+    predict_gboost=predict(m2,newdata=test,n.trees=ntrees[i])
+    
+    rmse_gboost=sqrt(mean((predict_gboost-test$shares)^2))
+    cvmseboo[i,j]<-rmse_gboost
+  }
+}
+a=which.min(cvmseboo)
+a
+param=function(a){ ##parametros de calibracion minimo MSE Test CV
+  lambdamse=ceiling(a/length(ntrees))
+  ntreesmse=a%%length(ntrees)
+  ntreesmse=ifelse(ntreesmse==0,length(shrin),ntreesmse)
+  return(c("ntrees"=round(ntrees[ntreesmse],0),"lambda"=shrin[lambdamse]))
+}
+param(a)
+
+m2=gbm(shares~.,data=train,n.trees=151,shrinkage=1.3,distribution="gaussian")
+
+predict_gboost=predict(m2,newdata=test,n.trees=151)
+
+rmse_gboost=sqrt(mean((predict_gboost-test$shares)^2))
+rmse_gboost
+
+predboostgbm<-predict(m2,testdata,n.trees = 201)
+
+library(caretEnsemble)
+library(tree)
+#BAGGING
+#############################################################################
+set.seed(8)
+B=800
+predictions=matrix(0,5277,ncol=B)
+
+for(i in 1:B){ 
+  sampler <- sample(nrow(X),replace=T)
+  #fit <- lm(shares ~ ., data =train[sampler,]) 
+  
+  #fit=glmnet(X[sampler,],y[sampler],alpha=1,lambda=cvmod1$lambda.min)
+  tcont=tree.control(nobs=21148,minsize = 4)
+  fit <- tree(shares ~ ., data =train[sampler,],control=tcont)
+  predictions[,i] <- predict(fit,newdata=test)
+} 
+
+
+f_baglasso=rowMeans(predictions)
+
+rmse_bag=sqrt(mean((f_baglasso-test$shares)^2))
+rmse_bag
+
+
+mse_individual=rep(0,B)
+
+for(i in 1:B){
+  mse_individual[i]=mean((predictions[,i]-test$shares)^2)
+}
+
+mse_individual
+mean(mse_individual)
+
+###############################################################
+########################
+#GAMS
+###################
+
+#Seleccion de variables forward
+library(ISLR)
+library(leaps)
+
+reg_subset=regsubsets(shares~.,train,nvmax=60,method="forward")
+
+#Los resultados quedan en "reg_sub_summary"
+reg_sub_summary=summary(reg_subset)
+reg_sub_summary
+
+#Se pueden ver varios argumentos del resultado
+reg_sub_summary$cp  #(los Cp mallows para cada mejor modelo con cada k)
+
+
+#Se grafican los resultados para cp, BIC y adjr2, tambi??n se muestran
+#la cantidad de variables seleccionadas y los nombres de ellas
+par(mfrow=c(1,3))
+
+plot(reg_sub_summary$cp,type="b") #El cp de mallows cambiando k
+cpmod=which.min(reg_sub_summary$cp)
+cpmod
+points(cpmod,reg_sub_summary$cp[cpmod],col = 'red', cex = 2, pch = 20)
+coef(reg_subset, cpmod)
+namcp<-names(coef(reg_subset, cpmod))[-1]
+namcp
+
+
+plot(reg_sub_summary$bic,type="b",col="red")  #El BIC
+bicmod=which.min(reg_sub_summary$bic)
+bicmod
+points(bicmod,reg_sub_summary$bic[bicmod],col = 'black', cex = 2, pch = 20)
+coef(reg_subset, bicmod)
+nambic<-names(coef(reg_subset, bicmod))[-1]
+nambic
+
+plot(reg_sub_summary$adjr2,type="b",col="blue")  #El R2ajustado
+adjr2mod=which.max(reg_sub_summary$adjr2)
+adjr2mod
+points(adjr2mod,reg_sub_summary$adjr2[adjr2mod],col = 'yellow', cex = 2, pch = 20)
+coef(reg_subset, adjr2mod)
+namadjr2<-names(coef(reg_subset, adjr2mod))[-1]
+namadjr2
+
+
+library(gam)
+library(mgcv)
+gam.m1=gam(shares~s(num_hrefs)+s(num_self_hrefs)+s(num_videos)
+           +data_channel_is_entertainment+s(kw_avg_avg,3)
+           +s(self_reference_avg_sharess,3)+s(LDA_03,3)
+           +s(global_subjectivity,3)+s(max_positive_polarity,3)
+           ,data=train)
+
+par(mfrow=c(2,3))
+plot.gam(gam.m1,se=TRUE,col="blue")
+
+pred_gam=predict(gam.m1,newdata=test)
+rmse_gam=sqrt(mean((pred_gam-test$shares)^2))
+rmse_gam
+
+predgam<-predict(gam.m1,testdata)
+
+
+######
+gam.m2=gam(shares~s(num_hrefs)+s(num_self_hrefs)+s(num_videos)
+           +data_channel_is_entertainment+s(kw_avg_avg,3)
+           +s(self_reference_avg_sharess,3)+s(LDA_03,3)
+           +s(global_subjectivity,3)+s(max_positive_polarity,3)
+           +s(average_token_length,3)+weekday_is_monday+weekday_is_wednesday
+           +s(LDA_00,3)+s(global_rate_positive_words,3)+weekday_is_saturday
+           ,data=train)
+
+par(mfrow=c(2,3))
+plot.gam(gam.m2,se=TRUE,col="blue")
+
+pred_gam2=predict(gam.m2,newdata=test)
+rmse_gam2=sqrt(mean((pred_gam2-test$shares)^2))
+rmse_gam2
+
+predgam2<-predict(gam.m2,testdata)
+
+
+######################################################
+###SVM
+library(e1071)
+svm_fit=svm(shares~.,data=train,cost=0.2,gamma=0.15,kernel="radial")
+summary(svm_fit)  #Resultado del modelo (significancia individual)
+
+rang=list(cost=c(0.01,0.05,0.1,1,2,5),gamma=c(0.01,0.05,0.1,0.5,1,2),kernel="radial")
+
+set.seed(3)
+
+#Tunning en dos parametros de calibracion
+tune_svm=tune(svm,shares~.,data=train,
+              ranges=rang)
+
+tune_svm
+
+#Modelo Calibrado
+svm_fit=svm(shares~.,data=train, cost=0.2,gamma=0.15,kernel="radial")
+
+
+#Ahora se predice en la muestra de prueba
+
+predisvm1=predict(svm_fit,test)  #no calcula probabilidades por factor en letras
+rmse_svm=sqrt(mean((predisvm1-test$shares)^2))
+rmse_svm
+
+predsvm<-predict(svm_fit,testdata)
+
+
+resultados<-rbind(rmserf,rmse_gam2,rmse_gam,rmsep1,rmse_boost,rmse_bag,rmse_gboost,rmse_svm)
+as.data.frame(resultados)
+colnames(resultados)<-"RMSE"
+resultados
